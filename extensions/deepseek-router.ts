@@ -2,7 +2,7 @@
  * deepseek-router.ts
  *
  * A "fake" provider that presents three router models to Pi:
- *   - deepseek-v4-flash    : opencode (free) -> opencode-go -> openrouter (200k ctx cap)
+ *   - deepseek-v4-flash    : opencode-go -> openrouter (200k ctx cap)
  *   - deepseek-v4-flash-1m : opencode-go              -> openrouter (1M ctx, no free tier)
  *   - deepseek-v4-pro      : opencode-go              -> openrouter
  *
@@ -17,7 +17,6 @@
  * every agent message; the first healthy upstream serves silently.
  *
  * A compound footer status shows, for the active tier:
- *   Free · Go NN% · OpenRouter $X.XX
  *   Go NN% · OpenRouter $X.XX
  * where "Go NN%" is OpenCode Go's dashboard usage percentage and
  * "OpenRouter $X.XX" is OpenRouter's *billed* credit usage (GET /api/v1/key).
@@ -84,7 +83,6 @@ interface WindowUsage {
 
 const DEFAULT_CONFIG: RouterConfig = {
   flash: [
-    { provider: "opencode", model: "deepseek-v4-flash-free", label: "Free" },
     { provider: "opencode-go", model: "deepseek-v4-flash", label: "Go" },
     { provider: "openrouter", model: "deepseek/deepseek-v4-flash-0731", label: "OpenRouter" },
   ],
