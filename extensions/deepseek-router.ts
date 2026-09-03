@@ -2,9 +2,9 @@
  * deepseek-router.ts
  *
  * A "fake" provider that presents three router models to Pi:
- *   - deepseek-v4-flash    : opencode-go -> openrouter (200k ctx cap, routes to deepseek-v4-flash-vision-exp)
- *   - deepseek-v4-flash-1m : opencode-go -> openrouter (1M ctx, routes to deepseek-v4-flash-vision-exp)
- *   - deepseek-v4-pro      : opencode-go              -> openrouter
+ *   - deepseek-v4-flash-vision-exp     : opencode-go -> openrouter (200k ctx cap)
+ *   - deepseek-v4-flash-1m-vision-exp  : opencode-go -> openrouter (1M ctx)
+ *   - deepseek-v4-pro                  : opencode-go -> openrouter
  *
  * The provider's streamSimple() re-issues the *same* normalized request
  * against each upstream provider in order, failing over silently (without the
@@ -97,8 +97,8 @@ const DEFAULT_CONFIG: RouterConfig = {
 };
 
 const ROUTER_PROVIDER = "deepseek-router";
-const FLASH_MODEL = "deepseek-v4-flash";
-const FLASH_1M_MODEL = "deepseek-v4-flash-1m";
+const FLASH_MODEL = "deepseek-v4-flash-vision-exp";
+const FLASH_1M_MODEL = "deepseek-v4-flash-1m-vision-exp";
 const PRO_MODEL = "deepseek-v4-pro";
 
 const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
