@@ -2,8 +2,8 @@
  * deepseek-router.ts
  *
  * A "fake" provider that presents three router models to Pi:
- *   - deepseek-v4-flash    : opencode-go -> openrouter (200k ctx cap)
- *   - deepseek-v4-flash-1m : opencode-go              -> openrouter (1M ctx, no free tier)
+ *   - deepseek-v4-flash    : opencode-go -> openrouter (200k ctx cap, routes to deepseek-v4-flash-vision-exp)
+ *   - deepseek-v4-flash-1m : opencode-go -> openrouter (1M ctx, routes to deepseek-v4-flash-vision-exp)
  *   - deepseek-v4-pro      : opencode-go              -> openrouter
  *
  * The provider's streamSimple() re-issues the *same* normalized request
@@ -83,12 +83,12 @@ interface WindowUsage {
 
 const DEFAULT_CONFIG: RouterConfig = {
   flash: [
-    { provider: "opencode-go", model: "deepseek-v4-flash", label: "Go" },
-    { provider: "openrouter", model: "deepseek/deepseek-v4-flash-0731", label: "OpenRouter" },
+    { provider: "opencode-go", model: "deepseek-v4-flash-vision-exp", label: "Go" },
+    { provider: "openrouter", model: "deepseek/deepseek-v4-flash-vision-exp", label: "OpenRouter" },
   ],
   flash1m: [
-    { provider: "opencode-go", model: "deepseek-v4-flash", label: "Go" },
-    { provider: "openrouter", model: "deepseek/deepseek-v4-flash-0731", label: "OpenRouter" },
+    { provider: "opencode-go", model: "deepseek-v4-flash-vision-exp", label: "Go" },
+    { provider: "openrouter", model: "deepseek/deepseek-v4-flash-vision-exp", label: "OpenRouter" },
   ],
   pro: [
     { provider: "opencode-go", model: "deepseek-v4-pro", label: "Go" },
@@ -556,9 +556,9 @@ export default function deepseekRouter(pi: ExtensionAPI): void {
     models: [
       {
         id: FLASH_MODEL,
-        name: "DeepSeek V4 Flash",
+        name: "DeepSeek V4 Flash Vision Exp",
         reasoning: true,
-        input: ["text"],
+        input: ["text", "image"],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         contextWindow: 200000,
         maxTokens: 128000,
@@ -576,9 +576,9 @@ export default function deepseekRouter(pi: ExtensionAPI): void {
       },
       {
         id: FLASH_1M_MODEL,
-        name: "DeepSeek V4 Flash 1M",
+        name: "DeepSeek V4 Flash 1M Vision Exp",
         reasoning: true,
-        input: ["text"],
+        input: ["text", "image"],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         contextWindow: 1000000,
         maxTokens: 128000,
