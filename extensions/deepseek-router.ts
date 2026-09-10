@@ -388,14 +388,17 @@ interface RouterIdentity {
  * Pi resolves a session's active model from the last assistant entry it
  * recorded (`getSessionContextSettings` in Pi's SessionManager: a
  * `model_change` entry first, but any later assistant message overrides it with
- * that message's own `provider`/`model`).
+ * that message's own `provider`/`model`). A live session keeps its selected
+ * model in memory, but every path that rebuilds a session from its entries —
+ * resuming it, `/fork`, and `/undo` (which forks before the last user message)
+ * — takes the model from those entries.
  *
  * Forwarding an upstream message verbatim therefore leaks the serving
- * upstream's identity into session state: after a single turn the session model
- * becomes e.g. `opencode-go/deepseek-v4-flash-vision-exp`, so the next turn
- * addresses that upstream directly and anything that restores session state
- * (`/fork`, and `/undo` which forks before the last user message) silently
- * switches the user off the router model.
+ * upstream's identity into session state: after a single turn that session
+ * restores as e.g. `opencode-go/deepseek-v4-flash-vision-exp` instead of the
+ * router model, silently switching the user off the router. The router also
+ * stops recognising the session's model as one of its tiers, which blanks its
+ * status line on resume.
  *
  * Re-stamp the router identity onto every forwarded message. The `usage`/`cost`
  * payload is left untouched, so real spend stays attributed to the upstream

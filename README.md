@@ -10,10 +10,11 @@ stable `x-opencode-session` header for routing and prompt-cache affinity.
 
 Served turns are re-stamped with the router's own `provider`/`model` identity on
 the way out (`usage`/`cost` are forwarded untouched, so spend is still
-attributed to the upstream that served the turn). Pi derives a session's active
-model from its last assistant entry, so without this the serving upstream would
-become the session model: the next turn would bypass the router entirely and
-`/fork` (including `/undo`) would silently switch the user off the router model.
+attributed to the upstream that served the turn). Pi rebuilds a session's model
+from its last assistant entry when resuming or forking it, so without this the
+upstream that served a turn would become that session's model: `/fork` (and
+`/undo`) would silently switch the user off the router, and the router would no
+longer recognise the session model as one of its tiers.
 
 Install as a Pi git package:
 
