@@ -2,9 +2,9 @@
  * deepseek-router.ts
  *
  * A "fake" provider that presents three router models to Pi:
- *   - deepseek-v4-flash-vision-exp     : opencode-go -> openrouter (200k ctx cap)
- *   - deepseek-v4-flash-1m-vision-exp  : opencode-go -> openrouter (1M ctx)
- *   - deepseek-v4-pro                  : opencode-go -> openrouter
+ *   - deepseek-v4.1-flash     : opencode-go -> openrouter (200k ctx cap)
+ *   - deepseek-v4.1-flash-1m  : opencode-go -> openrouter (1M ctx)
+ *   - deepseek-v4-pro         : opencode-go -> openrouter
  *
  * The provider's streamSimple() re-issues the *same* normalized request
  * against each upstream provider in order, failing over silently (without the
@@ -23,9 +23,10 @@
  *
  * Config (optional, auto-discovered at <agent-dir>/deepseek-router.json):
  *   {
- *     "flash": [ {provider, model, label}, ... ],
- *     "pro":   [ {provider, model, label}, ... ],
- *     "go":    { "workspaceId": "", "authCookie": "" }
+ *     "flash":   [ {provider, model, label}, ... ],
+ *     "flash1m": [ {provider, model, label}, ... ],
+ *     "pro":     [ {provider, model, label}, ... ],
+ *     "go":      { "workspaceId": "", "authCookie": "" }
  *   }
  * The `go` block is only needed for the OpenCode Go quota percentage; it is
  * read from OpenCode's web dashboard (the completion API key does not expose
@@ -37,6 +38,8 @@ import type {
   AssistantMessage,
   AssistantMessageEvent,
   AssistantMessageEventStream,
+  ProviderHeaders,
+  SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
 import type {
   ExtensionAPI,
@@ -83,12 +86,12 @@ interface WindowUsage {
 
 const DEFAULT_CONFIG: RouterConfig = {
   flash: [
-    { provider: "opencode-go", model: "deepseek-v4-flash-vision-exp", label: "Go" },
-    { provider: "openrouter", model: "deepseek/deepseek-v4-flash-vision-exp", label: "OpenRouter" },
+    { provider: "opencode-go", model: "deepseek-flash", label: "Go" },
+    { provider: "openrouter", model: "deepseek/deepseek-v4.1-flash", label: "OpenRouter" },
   ],
   flash1m: [
-    { provider: "opencode-go", model: "deepseek-v4-flash-vision-exp", label: "Go" },
-    { provider: "openrouter", model: "deepseek/deepseek-v4-flash-vision-exp", label: "OpenRouter" },
+    { provider: "opencode-go", model: "deepseek-flash", label: "Go" },
+    { provider: "openrouter", model: "deepseek/deepseek-v4.1-flash", label: "OpenRouter" },
   ],
   pro: [
     { provider: "opencode-go", model: "deepseek-v4-pro", label: "Go" },
@@ -97,8 +100,8 @@ const DEFAULT_CONFIG: RouterConfig = {
 };
 
 const ROUTER_PROVIDER = "deepseek-router";
-const FLASH_MODEL = "deepseek-v4-flash-vision-exp";
-const FLASH_1M_MODEL = "deepseek-v4-flash-1m-vision-exp";
+const FLASH_MODEL = "deepseek-v4.1-flash";
+const FLASH_1M_MODEL = "deepseek-v4.1-flash-1m";
 const PRO_MODEL = "deepseek-v4-pro";
 
 const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
@@ -455,6 +458,38 @@ function markSuccess(provider: string): void {
   backoff.delete(provider);
 }
 
+function hasHeader(headers: ProviderHeaders, name: string): boolean {
+  const expected = name.toLowerCase();
+  return Object.keys(headers).some((key) => key.toLowerCase() === expected);
+}
+
+function upstreamHeaders(
+  step: RouteStep,
+  authHeaders: ProviderHeaders | undefined,
+  options?: SimpleStreamOptions,
+): ProviderHeaders {
+  const headers: ProviderHeaders = {
+    ...(authHeaders ?? {}),
+    ...(options?.headers ?? {}),
+  };
+
+  // Pi adds OpenCode attribution headers according to the selected model. The
+  // selected model here belongs to deepseek-router, so add them explicitly for
+  // delegated OpenCode requests. Keep the same stable Pi session ID across
+  // retries and let explicitly supplied headers take precedence.
+  if (step.provider.startsWith("opencode")) {
+    const sessionId = options?.sessionId;
+    if (typeof sessionId === "string" && sessionId && !hasHeader(headers, "x-opencode-session")) {
+      headers["x-opencode-session"] = sessionId;
+    }
+    if (!hasHeader(headers, "x-opencode-client")) {
+      headers["x-opencode-client"] = "pi";
+    }
+  }
+
+  return headers;
+}
+
 function routerStreamSimple(model: any, context: any, options?: any): AssistantMessageEventStream {
   const out = createAssistantMessageEventStream();
   const tier = tierFor(model.id);
@@ -493,7 +528,7 @@ function routerStreamSimple(model: any, context: any, options?: any): AssistantM
       const sub = upstream.streamSimple(requestModel as any, context, {
         ...options,
         apiKey: auth.apiKey,
-        headers: { ...(auth.headers ?? {}), ...(options?.headers ?? {}) },
+        headers: upstreamHeaders(step, auth.headers, options),
         env: { ...(auth.env ?? {}), ...(options?.env ?? {}) },
       });
 
@@ -556,7 +591,7 @@ export default function deepseekRouter(pi: ExtensionAPI): void {
     models: [
       {
         id: FLASH_MODEL,
-        name: "DeepSeek V4 Flash Vision Exp",
+        name: "DeepSeek V4.1 Flash",
         reasoning: true,
         input: ["text", "image"],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -576,12 +611,12 @@ export default function deepseekRouter(pi: ExtensionAPI): void {
       },
       {
         id: FLASH_1M_MODEL,
-        name: "DeepSeek V4 Flash 1M Vision Exp",
+        name: "DeepSeek V4.1 Flash 1M",
         reasoning: true,
         input: ["text", "image"],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         contextWindow: 1000000,
-        maxTokens: 128000,
+        maxTokens: 384000,
         thinkingLevelMap: { off: null, minimal: null, low: null, medium: null, high: "high", xhigh: null, max: "max" },
       },
     ],
