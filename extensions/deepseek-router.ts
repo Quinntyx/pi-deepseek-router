@@ -9,9 +9,12 @@
  * The provider's streamSimple() re-issues the *same* normalized request
  * against each upstream provider in order, failing over silently (without the
  * agent re-sending the user's prompt) when an upstream fails before emitting
- * any content due to quota exhaustion. The first upstream that
- * starts streaming "wins"; its events are forwarded verbatim so Pi attributes
- * usage and cost to the real serving provider.
+ * any content due to quota exhaustion. The first upstream that starts
+ * streaming "wins"; its usage/cost payload is forwarded untouched so Pi
+ * attributes real spend to the serving provider, while the message
+ * provider/model identity is re-stamped to this router (see `rebrand`) so Pi
+ * keeps the router model in session state rather than switching to the
+ * upstream that happened to serve the turn.
  * After a quota failure, the failed provider is put on a wall-clock
  * backoff (1-2 min, x2 per failure, capped at 1h) so we don't re-hit it on
  * every agent message; the first healthy upstream serves silently.
@@ -375,6 +378,40 @@ type ForwardResult =
   | { kind: "retryable"; message: AssistantMessage }
   | { kind: "hard"; message: AssistantMessage };
 
+/** Provider/model identity of the router model the user actually selected. */
+interface RouterIdentity {
+  provider: string;
+  id: string;
+}
+
+/**
+ * Pi resolves a session's active model from the last assistant entry it
+ * recorded (`getSessionContextSettings` in Pi's SessionManager: a
+ * `model_change` entry first, but any later assistant message overrides it with
+ * that message's own `provider`/`model`).
+ *
+ * Forwarding an upstream message verbatim therefore leaks the serving
+ * upstream's identity into session state: after a single turn the session model
+ * becomes e.g. `opencode-go/deepseek-v4-flash-vision-exp`, so the next turn
+ * addresses that upstream directly and anything that restores session state
+ * (`/fork`, and `/undo` which forks before the last user message) silently
+ * switches the user off the router model.
+ *
+ * Re-stamp the router identity onto every forwarded message. The `usage`/`cost`
+ * payload is left untouched, so real spend stays attributed to the upstream
+ * that served the turn.
+ */
+function rebrand(event: AssistantMessageEvent, model: RouterIdentity): AssistantMessageEvent {
+  const stamp = (message: AssistantMessage): AssistantMessage => ({
+    ...message,
+    provider: model.provider,
+    model: model.id,
+  });
+  if (event.type === "done") return { ...event, message: stamp(event.message) };
+  if (event.type === "error") return { ...event, error: stamp(event.error) };
+  return { ...event, partial: stamp(event.partial) };
+}
+
 /**
  * Forwards an upstream stream into `out`. Emits nothing until the upstream is
  * committed to a concrete result, so a pre-content failure can be failed over
@@ -383,7 +420,11 @@ type ForwardResult =
  *  - retryable -> NOTHING forwarded; caller may try the next upstream.
  *  - hard      -> start(+content)+error already forwarded to `out`.
  */
-async function forward(sub: AssistantMessageEventStream, out: AssistantMessageEventStream): Promise<ForwardResult> {
+async function forward(
+  sub: AssistantMessageEventStream,
+  out: AssistantMessageEventStream,
+  model: RouterIdentity,
+): Promise<ForwardResult> {
   let stashedStart: AssistantMessageEvent | null = null;
   let emitted = false;
 
@@ -394,10 +435,10 @@ async function forward(sub: AssistantMessageEventStream, out: AssistantMessageEv
     }
     if (ev.type === "done") {
       if (stashedStart && !emitted) {
-        out.push(stashedStart);
+        out.push(rebrand(stashedStart, model));
         emitted = true;
       }
-      out.push(ev);
+      out.push(rebrand(ev, model));
       return { kind: "success" };
     }
     if (ev.type === "error") {
@@ -407,20 +448,20 @@ async function forward(sub: AssistantMessageEventStream, out: AssistantMessageEv
           return { kind: "retryable", message: ev.error };
         }
         // Hard pre-content error: surface it.
-        if (stashedStart) out.push(stashedStart);
-        out.push(ev);
+        if (stashedStart) out.push(rebrand(stashedStart, model));
+        out.push(rebrand(ev, model));
         return { kind: "hard", message: ev.error };
       }
       // Already streaming content; can't retry, must surface.
-      out.push(ev);
+      out.push(rebrand(ev, model));
       return { kind: "hard", message: ev.error };
     }
     // Content / thinking / toolcall event.
     if (stashedStart && !emitted) {
-      out.push(stashedStart);
+      out.push(rebrand(stashedStart, model));
       emitted = true;
     }
-    out.push(ev);
+    out.push(rebrand(ev, model));
   }
 
   // Stream ended without a terminal event.
@@ -532,7 +573,7 @@ function routerStreamSimple(model: any, context: any, options?: any): AssistantM
         env: { ...(auth.env ?? {}), ...(options?.env ?? {}) },
       });
 
-      const res = await forward(sub, out);
+      const res = await forward(sub, out, model);
       if (res.kind === "success") {
         servedBy = step.label;
         markSuccess(step.provider);
