@@ -16,8 +16,9 @@
  * keeps the router model in session state rather than switching to the
  * upstream that happened to serve the turn.
  * After a quota failure, the failed provider is put on a wall-clock
- * backoff (1-2 min, x2 per failure, capped at 1h) so we don't re-hit it on
- * every agent message; the first healthy upstream serves silently.
+ * backoff (1-2 min, x2 per failure, capped at 5 min) so we don't re-hit it on
+ * every agent message. OpenCode is retried after that short cap, or sooner when
+ * its dashboard reports that a quota window has recovered.
  *
  * A compound footer status shows, for the active tier:
  *   Go NN% · OpenRouter $X.XX
@@ -89,11 +90,11 @@ interface WindowUsage {
 
 const DEFAULT_CONFIG: RouterConfig = {
   flash: [
-    { provider: "opencode-go", model: "deepseek-flash", label: "Go" },
+    { provider: "opencode-go", model: "deepseek-v4.1-flash", label: "Go" },
     { provider: "openrouter", model: "deepseek/deepseek-v4.1-flash", label: "OpenRouter" },
   ],
   flash1m: [
-    { provider: "opencode-go", model: "deepseek-flash", label: "Go" },
+    { provider: "opencode-go", model: "deepseek-v4.1-flash", label: "Go" },
     { provider: "openrouter", model: "deepseek/deepseek-v4.1-flash", label: "OpenRouter" },
   ],
   pro: [
@@ -132,15 +133,20 @@ let lastStatus: string | undefined;
 
 // Per-provider failure backoff: after a retryable (pre-content) failure we
 // avoid re-hitting the same upstream for a wall-clock window that grows
-// exponentially — 1-2 min initially, x2 per failure, capped at 1 hour.
+// exponentially — 1-2 min initially, x2 per failure, capped at 5 minutes.
+// The short cap guarantees that a recovered primary is probed regularly even
+// when dashboard quota information is unavailable or stale.
 const BACKOFF_INITIAL_MIN = 60_000;
 const BACKOFF_INITIAL_MAX = 120_000;
 const BACKOFF_MULTIPLIER = 2;
-const BACKOFF_MAX = 3_600_000;
+const BACKOFF_MAX = 300_000;
+
+type GoUsageSnapshot = Partial<Record<"rolling" | "weekly" | "monthly", number>>;
 
 interface BackoffState {
   nextRetryAt: number;
   delayMs: number;
+  goUsageAtFailure?: GoUsageSnapshot;
 }
 const backoff = new Map<string, BackoffState>();
 
@@ -168,13 +174,22 @@ function cloneConfig(c: RouterConfig): RouterConfig {
   };
 }
 
+function normalizeStep(step: RouteStep): RouteStep {
+  // OpenCode renamed this model. Migrate existing user configs so upgrading the
+  // extension does not leave the primary permanently unresolved.
+  if (step.provider === "opencode-go" && step.model === "deepseek-flash") {
+    return { ...step, model: "deepseek-v4.1-flash" };
+  }
+  return { ...step };
+}
+
 function loadConfig(): void {
   try {
     const raw = JSON.parse(readFileSync(CONFIG_PATH, "utf8")) as Partial<RouterConfig>;
     config = {
-      flash: Array.isArray(raw.flash) && raw.flash.length ? raw.flash : cloneConfig(DEFAULT_CONFIG).flash,
-      flash1m: Array.isArray(raw.flash1m) && raw.flash1m.length ? raw.flash1m : cloneConfig(DEFAULT_CONFIG).flash1m,
-      pro: Array.isArray(raw.pro) && raw.pro.length ? raw.pro : cloneConfig(DEFAULT_CONFIG).pro,
+      flash: (Array.isArray(raw.flash) && raw.flash.length ? raw.flash : DEFAULT_CONFIG.flash).map(normalizeStep),
+      flash1m: (Array.isArray(raw.flash1m) && raw.flash1m.length ? raw.flash1m : DEFAULT_CONFIG.flash1m).map(normalizeStep),
+      pro: (Array.isArray(raw.pro) && raw.pro.length ? raw.pro : DEFAULT_CONFIG.pro).map(normalizeStep),
       go: { ...(raw.go ?? {}) },
     };
   } catch {
@@ -324,11 +339,14 @@ async function refreshGoQuota(force = false): Promise<void> {
     const monthly = parseWindow(html, "monthlyUsage");
     if (!rolling && !weekly && !monthly) {
       goRolling = null;
+      goWeekly = null;
+      goMonthly = null;
       return;
     }
     goRolling = rolling;
     goWeekly = weekly;
     goMonthly = monthly;
+    clearRecoveredGoBackoffs();
   } catch {
     // keep last-known value
   }
@@ -489,12 +507,42 @@ function backoffRemaining(provider: string): number {
   return remaining > 0 ? remaining : 0;
 }
 
+function currentGoUsage(): GoUsageSnapshot {
+  return {
+    ...(goRolling ? { rolling: goRolling.pct } : {}),
+    ...(goWeekly ? { weekly: goWeekly.pct } : {}),
+    ...(goMonthly ? { monthly: goMonthly.pct } : {}),
+  };
+}
+
+function quotaRecovered(failed: GoUsageSnapshot, current: GoUsageSnapshot): boolean {
+  return (Object.keys(failed) as Array<keyof GoUsageSnapshot>).some((window) => {
+    const before = failed[window];
+    const now = current[window];
+    return before != null && now != null && now < before;
+  });
+}
+
+function clearRecoveredGoBackoffs(): void {
+  const current = currentGoUsage();
+  for (const [provider, state] of backoff) {
+    if (!provider.startsWith("opencode") || !state.goUsageAtFailure) continue;
+    if (!quotaRecovered(state.goUsageAtFailure, current)) continue;
+    backoff.delete(provider);
+    notify(`DeepSeek router: OpenCode quota recovered — retrying ${provider} on the next request`, "info");
+  }
+}
+
 function markFailure(provider: string): number {
   const b = backoff.get(provider);
   const delayMs = b
     ? Math.min(b.delayMs * BACKOFF_MULTIPLIER, BACKOFF_MAX)
     : BACKOFF_INITIAL_MIN + Math.random() * (BACKOFF_INITIAL_MAX - BACKOFF_INITIAL_MIN);
-  backoff.set(provider, { nextRetryAt: Date.now() + delayMs, delayMs });
+  backoff.set(provider, {
+    nextRetryAt: Date.now() + delayMs,
+    delayMs,
+    goUsageAtFailure: provider.startsWith("opencode") ? currentGoUsage() : undefined,
+  });
   return delayMs;
 }
 
@@ -553,7 +601,9 @@ function routerStreamSimple(model: any, context: any, options?: any): AssistantM
 
       const target = registry?.find(step.provider, step.model);
       if (!target) {
-        lastMessage = buildError(model, `Router: upstream ${step.provider}/${step.model} not found`);
+        const detail = `Router: upstream ${step.provider}/${step.model} not found`;
+        lastMessage = buildError(model, detail);
+        notify(`DeepSeek router: ${detail}; trying the next route`, "warning");
         continue;
       }
       const upstream = registry?.getProvider(step.provider);
