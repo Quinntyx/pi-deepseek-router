@@ -25,6 +25,13 @@
  * where "Go NN%" is OpenCode Go's dashboard usage percentage and
  * "OpenRouter $X.XX" is OpenRouter's *billed* credit usage (GET /api/v1/key).
  *
+ * The status is published through the generic extension status-item protocol
+ * consumed by the opencode-prompt status row (which replaces the built-in
+ * footer, so ctx.ui.setStatus() alone is invisible there):
+ *   `status-item`         { key, text } — set/clear this extension's item
+ *   `status-item:request` re-publish the current value on demand
+ * ctx.ui.setStatus() is also kept for UIs that render the standard footer.
+ *
  * Config (optional, auto-discovered at <agent-dir>/deepseek-router.json):
  *   {
  *     "flash":   [ {provider, model, label}, ... ],
@@ -110,6 +117,11 @@ const PRO_MODEL = "deepseek-v4-pro";
 
 const AGENT_DIR = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
 const CONFIG_PATH = join(AGENT_DIR, "deepseek-router.json");
+
+// Generic status-item protocol (see opencode-prompt for the consumer side).
+const STATUS_EVENT = "status-item";
+const STATUS_REQUEST_EVENT = "status-item:request";
+const STATUS_KEY = "deepseek-router";
 
 // Only genuine quota exhaustion triggers silent failover to the next
 // upstream. Everything else (rate-limit, 5xx, network hiccups) surfaces
@@ -362,7 +374,7 @@ async function refreshQuota(force = false): Promise<void> {
 
 function emitStatus(text: string | undefined): void {
   lastStatus = text;
-  piRef?.events.emit("deepseek-router:status", text ?? null);
+  piRef?.events.emit(STATUS_EVENT, { key: STATUS_KEY, text: text ?? null });
 }
 
 function renderStatus(): void {
@@ -673,7 +685,7 @@ function routerStreamSimple(model: any, context: any, options?: any): AssistantM
 export default function deepseekRouter(pi: ExtensionAPI): void {
   loadConfig();
   piRef = pi;
-  pi.events.on("deepseek-router:request", () => emitStatus(lastStatus));
+  pi.events.on(STATUS_REQUEST_EVENT, () => emitStatus(lastStatus));
 
   pi.registerProvider(ROUTER_PROVIDER, {
     name: "DeepSeek Router",
